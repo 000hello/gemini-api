@@ -3,7 +3,7 @@
       "start": "deno serve src/deno_index.ts"
     },
     "deploy": {
-      "entrypoint": "src/deno_index.ts",
+      "entrypoint": "main.ts",
       "org": "000hello"
     }
 }

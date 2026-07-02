@@ -1,1 +1,5 @@
-Deno.serve((_req: Request) => new Response("ok"));
+export default {
+  fetch(_req: Request): Response {
+    return new Response("ok");
+  },
+};
