@@ -1,5 +1,9 @@
 {
     "tasks": {
       "start": "deno run --allow-net --allow-read src/index.ts"
+    },
+    "deploy": {
+      "entrypoint": "src/deno_index.ts",
+      "org": "000hello"
     }
 }
