@@ -1,5 +1,51 @@
+const TARGET = "https://generativelanguage.googleapis.com";
+
 export default {
-  fetch(_req: Request): Response {
-    return new Response("ok");
+  async fetch(req: Request): Promise<Response> {
+    const url = new URL(req.url);
+
+    if (url.pathname === "/" || url.pathname === "/health") {
+      return new Response("ok");
+    }
+
+    if (req.method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          "access-control-allow-origin": "*",
+          "access-control-allow-headers": "*",
+          "access-control-allow-methods": "GET, POST, OPTIONS",
+        },
+      });
+    }
+
+    try {
+      const targetUrl = TARGET + url.pathname + url.search;
+      const headers = new Headers();
+      for (const [k, v] of req.headers) {
+        const lk = k.toLowerCase();
+        if (lk !== "host" && lk !== "connection") headers.set(k, v);
+      }
+      const method = req.method;
+      const body = (method === "GET" || method === "HEAD") ? null : await req.text();
+      const init: RequestInit = { method, headers };
+      if (body) init.body = body;
+
+      const res = await fetch(targetUrl, init);
+      const data = await res.text();
+
+      return new Response(data, {
+        status: res.status,
+        headers: {
+          "content-type": res.headers.get("content-type") || "application/json",
+          "access-control-allow-origin": "*",
+        },
+      });
+    } catch (e) {
+      return new Response("proxy error: " + String(e), {
+        status: 502,
+        headers: { "content-type": "text/plain" },
+      });
+    }
   },
 };
