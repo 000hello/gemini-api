@@ -1,90 +1,114 @@
-async function handleWebSocket(req: Request): Promise<Response> {
-  const { socket: clientWs, response } = Deno.upgradeWebSocket(req);
+/**
+ * Gemini 透明代理 — 把所有请求原样转发到 Google Gemini API
+ * 配合 CC Switch 本地代理使用：Anthropic → Gemini Native → 此代理 → Google
+ */
+const GOOGLE_API = "https://generativelanguage.googleapis.com";
 
+// ===== WebSocket 转发（流式生成）=====
+function handleWebSocket(req: Request): Response {
   const url = new URL(req.url);
   const targetUrl = `wss://generativelanguage.googleapis.com${url.pathname}${url.search}`;
+  console.log("[WS] ->", targetUrl);
 
-  console.log('Target URL:', targetUrl);
-
-  const pendingMessages: string[] = [];
+  const { socket: clientWs, response } = Deno.upgradeWebSocket(req);
   const targetWs = new WebSocket(targetUrl);
+  const pending: string[] = [];
 
   targetWs.onopen = () => {
-    console.log('Connected to Gemini');
-    pendingMessages.forEach(msg => targetWs.send(msg));
-    pendingMessages.length = 0;
+    console.log("[WS] connected to Gemini");
+    pending.forEach((m) => targetWs.send(m));
+    pending.length = 0;
   };
 
-  clientWs.onmessage = (event) => {
-    console.log('Client message received');
-    if (targetWs.readyState === WebSocket.OPEN) {
-      targetWs.send(event.data);
-    } else {
-      pendingMessages.push(event.data);
-    }
+  clientWs.onmessage = (e) => {
+    targetWs.readyState === WebSocket.OPEN
+      ? targetWs.send(e.data)
+      : pending.push(e.data);
   };
 
-  targetWs.onmessage = (event) => {
-    console.log('Gemini message received');
-    if (clientWs.readyState === WebSocket.OPEN) {
-      clientWs.send(event.data);
-    }
+  targetWs.onmessage = (e) => {
+    if (clientWs.readyState === WebSocket.OPEN) clientWs.send(e.data);
   };
 
-  clientWs.onclose = (event) => {
-    console.log('Client connection closed');
-    if (targetWs.readyState === WebSocket.OPEN) {
-      targetWs.close(1000, event.reason);
-    }
+  clientWs.onclose = (e) => {
+    console.log("[WS] client closed");
+    if (targetWs.readyState === WebSocket.OPEN) targetWs.close(1000, e.reason);
   };
 
-  targetWs.onclose = (event) => {
-    console.log('Gemini connection closed');
-    if (clientWs.readyState === WebSocket.OPEN) {
-      clientWs.close(event.code, event.reason);
-    }
+  targetWs.onclose = (e) => {
+    console.log("[WS] gemini closed, code:", e.code);
+    if (clientWs.readyState === WebSocket.OPEN) clientWs.close(e.code, e.reason);
   };
 
-  targetWs.onerror = (error) => {
-    console.error('Gemini WebSocket error:', error);
-  };
+  targetWs.onerror = (e) => console.error("[WS] gemini error:", e);
 
   return response;
 }
 
-async function handleAPIRequest(req: Request): Promise<Response> {
-  try {
-    const worker = await import('./api_proxy/worker.mjs');
-    return await worker.default.fetch(req);
-  } catch (error) {
-    console.error('API request error:', error);
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-    const errorStatus = (error as { status?: number }).status || 500;
-    return new Response(errorMessage, {
-      status: errorStatus,
-      headers: {
-        'content-type': 'text/plain;charset=UTF-8',
-      }
-    });
-  }
+// ===== HTTP 转发 =====
+async function handleHTTP(req: Request): Promise<Response> {
+  const url = new URL(req.url);
+  const targetUrl = `${GOOGLE_API}${url.pathname}${url.search}`;
+  console.log(`[HTTP] ${req.method} -> ${targetUrl}`);
+
+  // 复制请求头，去掉 host（让 fetch 自己设）
+  const headers = new Headers();
+  req.headers.forEach((v, k) => {
+    if (!["host", "cf-", "x-forwarded", "x-real"].some((p) =>
+      k.toLowerCase().startsWith(p)
+    )) {
+      headers.set(k, v);
+    }
+  });
+
+  // 对于 GET 请求，不传 body
+  const body = req.method === "GET" || req.method === "HEAD"
+    ? undefined
+    : req.body;
+
+  const proxyReq = new Request(targetUrl, {
+    method: req.method,
+    headers,
+    body,
+    redirect: "follow",
+  });
+
+  const res = await fetch(proxyReq);
+  console.log(`[HTTP] <- ${res.status} ${res.statusText}`);
+
+  // 构建响应头（加 CORS）
+  const resHeaders = new Headers(res.headers);
+  resHeaders.set("Access-Control-Allow-Origin", "*");
+
+  return new Response(res.body, {
+    status: res.status,
+    statusText: res.statusText,
+    headers: resHeaders,
+  });
 }
 
+// ===== 主入口 =====
 async function handleRequest(req: Request): Promise<Response> {
-  const url = new URL(req.url);
-  console.log('Request URL:', req.url);
+  // CORS 预检
+  if (req.method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+        "Access-Control-Allow-Headers": "*",
+      },
+    });
+  }
 
-  // WebSocket 处理
+  // WebSocket
   if (req.headers.get("Upgrade")?.toLowerCase() === "websocket") {
     return handleWebSocket(req);
   }
 
-  if (url.pathname.endsWith("/chat/completions") ||
-    url.pathname.endsWith("/embeddings") ||
-    url.pathname.endsWith("/models")) {
-    return handleAPIRequest(req);
-  }
-
-  return new Response('ok');
+  // 其他全部 HTTP 转发
+  return handleHTTP(req);
 }
 
-Deno.serve(handleRequest); 
+Deno.serve(handleRequest);
+console.log("Gemini proxy running on http://localhost:8000");
